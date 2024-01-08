@@ -41,14 +41,30 @@ class SinusoidalEmbedding(nn.Module):
         assert emb.shape == (t.shape[0], self.emb_dim * 4)
         return emb
 
+class Downsample(nn.Module):
+    '''
+    Conv2d to downsample in half.
+    '''
+    pass
+
+class Upsample(nn.Module):
+    '''
+    Conv2d to upsample image 2x
+    '''
+    pass
 
 class ResidualBlock(nn.Module):
     """
-    Each Layer has two conv layers and graphNorm. Also downsample
+    Implement each Residual Block and Sampling.
     """
 
     def __init__(
-        self, in_channels: int, out_channels: int, num_groups=32, dropout_p=0.1
+        self,
+        in_channels: int,
+        out_channels: int,
+        num_groups=32,
+        dropout_p=0.1,
+        has_attn=False,
     ) -> None:
         super().__init__()
         # Multiply number of channels
@@ -57,8 +73,8 @@ class ResidualBlock(nn.Module):
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
         self.dropout = nn.Dropout2d(dropout_p)
 
-        # Sinusoidal Embedding Layer
-        self.time_embed = SinusoidalEmbedding(out_channels // 4)
+        # Linear Layer for sinusoidal embedding
+        self.time_dense = nn.Linear(out_channels, out_channels)
 
         # Downsample feature map resolution
         self.gn2 = nn.GroupNorm(num_groups=num_groups, num_channels=out_channels)
@@ -67,15 +83,22 @@ class ResidualBlock(nn.Module):
         if in_channels == out_channels:
             self.skip = nn.Identity()
         else:
-            self.skip = nn.Conv2d(in_channels, out_channels, 1) # Learn expansion of data to out_channels dimension!
+            self.skip = nn.Conv2d(
+                in_channels, out_channels, 1
+            )  # Learn expansion of data to out_channels dimension!
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        if has_attn:
+            self.attn = nn.MultiheadAttention(out_channels, num_heads=1)
+        else:
+            self.attn = nn.Identity()
+
+    def forward(self, x: torch.Tensor, emb_t: torch.Tensor) -> torch.Tensor:
         residual = self.skip(x)
 
         out = self.conv1(self.act(self.gn1(x)))  # Shape = (B x out_channels x H x W)
 
         # Add timestep embedding
-        emb_t = self.time_embed(t)  # Shape = (B x out_channels)
+        emb_t = self.time_dense(self.act(emb_t))  # Shape = (B x out_channels)
 
         out = out + emb_t[:, :, None, None]
 
@@ -87,36 +110,45 @@ class ResidualBlock(nn.Module):
 
         return out + residual
 
-class ResidualBlockWithAttention(nn.Module):
+class DownsampleBlock(nn.Module):
+    '''
+    Residual Block + Downsampling. 
+    '''
+    pass
+
+class UpsampleBlock(nn.Module):
+    '''
+    Residual Block + Upsampling. Shape Layers to allow skip connections.
+    '''
+    pass
+
+class BottleneckBlock(nn.Module):
+    '''
+    Bottleneck Block. Res + Attn + Res. All shapes stay the same.
+    '''
+    pass
+
+class DiffusionUNet(nn.Module):
     """
-    ResBlock with self attention added on
+    Compose ResidualBlocks in UNet for noise prediction.
     """
 
-
-class UNet(nn.Module):
-    def __init__(self, in_features, out_features, in_channels=3):
-        """
-        Initialize all component models of the neural network.
-        Sequence of 6 blocks of 5 ResNet layers.
-        As seen in PixelCNN++ paper.
-        """
+    def __init__(self, in_channels=3):
         super().__init__()
 
-        # Encoder Layers (assume 256 image size)
-        ## 1. ResBlock to convert to 64 channels.
-        ## 2. Two back to back ResBlocks
-        ## 3. Downsample from 256 x 256 x 64 to 128 x 128 x 128
-        ## 4. 64 x 64 x 128
-        ## 5. 32 x 32 x 256
-        ## Self Attention here! after first Resblock
-        ## 6. 16 x 16 x 256
-        ## 7. 8  x 8  x 512
-        ## 8. 4  x 4  x 512
+        self.conv1 = nn.Conv2d(in_channels, 128)
+
+        self.time_embed = SinusoidalEmbedding()
+        
+        # Encoder Layers:
+
+        # Bottleneck Layer
 
         # Decoder Layers
-        # Reverse everything in the encoder layers.
-        # Account for skip connections for num channels
 
-        # Convert 256 x 256 x 64 back to 256 x 256 x 3 again using last ResBlock
 
-        # Also add the positional embedding!
+    def forward(self, img: torch.Tensor, t: torch.Tensor):
+        # TODO: Fix Positional Embedding t. Only compute linear transform once, use the same embedding in all layers.
+        # Implement forward logic through all layers. Make sure to implement skip connections!        
+        emb_t = self.time_embed(t)
+        
