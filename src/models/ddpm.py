@@ -41,6 +41,7 @@ class SinusoidalEmbedding(nn.Module):
         assert emb.shape == (t.shape[0], self.emb_dim * 4)
         return emb
 
+
 class ResidualBlock(nn.Module):
     """
     Each Layer has two conv layers and graphNorm. Also downsample
@@ -56,20 +57,27 @@ class ResidualBlock(nn.Module):
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
         self.dropout = nn.Dropout2d(dropout_p)
 
+        # Sinusoidal Embedding Layer
+        self.time_embed = SinusoidalEmbedding(out_channels // 4)
+
         # Downsample feature map resolution
-        self.gn2 = nn.GroupNorm(num_groups=num_groups, num_channels=in_channels)
+        self.gn2 = nn.GroupNorm(num_groups=num_groups, num_channels=out_channels)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
 
         if in_channels == out_channels:
             self.skip = nn.Identity()
         else:
-            self.skip = nn.Conv2d(in_channels, out_channels, 3, padding=1)
+            self.skip = nn.Conv2d(in_channels, out_channels, 1) # Learn expansion of data to out_channels dimension!
 
-    def forward(self, x: torch.Tensor, t) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         residual = self.skip(x)
 
-        out = self.conv1(self.act(self.gn1(x)))
+        out = self.conv1(self.act(self.gn1(x)))  # Shape = (B x out_channels x H x W)
+
         # Add timestep embedding
+        emb_t = self.time_embed(t)  # Shape = (B x out_channels)
+
+        out = out + emb_t[:, :, None, None]
 
         out = self.act(self.gn2(x))
         out = self.dropout(out)
@@ -78,7 +86,6 @@ class ResidualBlock(nn.Module):
         assert out.shape == residual.shape
 
         return out + residual
-
 
 class ResidualBlockWithAttention(nn.Module):
     """
