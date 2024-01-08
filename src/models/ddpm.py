@@ -1,7 +1,6 @@
 """
 Implementation of Denoising Diffusion Probabilistic Models (DDPM) using Pytorch.
 
-DDPM's network architecture is a UNet 
 """
 import math
 
@@ -135,70 +134,57 @@ class DiffusionUNet(nn.Module):
     Compose ResidualBlocks in UNet for noise prediction.
     """
 
-    def __init__(self, in_channels=3, num_groups=32):
+    def __init__(self, in_channels=3, img_channels_list=[128, 256, 256, 256], attn_layers=[False, True, False, False], start_ch=128, num_groups=32):
         """
         Initialization for a 32 x 32 dataset.
         """
         super().__init__()
-        channels_list = [128, 128, 256, 256, 256]
         resolutions_list = [32, 32, 16, 8, 4]
-        TIME_EMBED_NCHAN = channels_list[0] * 4
+        TIME_EMBED_NCHAN = start_ch * 4
 
-        self.conv1 = nn.Conv2d(in_channels, channels_list[0])
+        self.conv1 = nn.Conv2d(in_channels, start_ch)
         self.time_embed = SinusoidalEmbedding(
             TIME_EMBED_NCHAN
         )  # Start at 4x initial dimension. Max number of channels in this network's bottleneck.
 
         # Encoder Layers:
-        self.enc_res1 = ResidualBlock(
-            channels_list[0], channels_list[1], TIME_EMBED_NCHAN
-        )
-        self.ds1 = Downsample(channels_list[1])  # 16
-        self.enc_res2 = ResidualBlock(
-            channels_list[1], channels_list[2], TIME_EMBED_NCHAN, has_attn=True
-        )
-        self.ds2 = Downsample(channels_list[2])  # 8
-        self.enc_res3 = ResidualBlock(
-            channels_list[2], channels_list[3], TIME_EMBED_NCHAN
-        )
-        self.ds3 = Downsample(channels_list[3])  # 4
-        self.enc_res4 = ResidualBlock(
-            channels_list[3], channels_list[4], TIME_EMBED_NCHAN
-        )
+        self.enc_layers = []
+        self.downsample_layers = []
+        
+        in_chan = start_ch
+        for i, out_chan in enumerate(img_channels_list):
+            self.enc_layers.append(ResidualBlock(in_chan, out_chan, TIME_EMBED_NCHAN, has_attn=attn_layers[i]))
+            if i < len(img_channels_list):
+                self.downsample_layers.append(Downsample(out_chan))
+            in_chan = out_chan
 
         # Bottleneck Layer
         self.mid_res1 = ResidualBlock(
-            channels_list[-1], channels_list[-1], TIME_EMBED_NCHAN, has_attn=True
+            img_channels_list[-1], img_channels_list[-1], TIME_EMBED_NCHAN, has_attn=True
         )
         self.mid_res2 = ResidualBlock(
-            channels_list[-1], channels_list[-1], TIME_EMBED_NCHAN
+            img_channels_list[-1], img_channels_list[-1], TIME_EMBED_NCHAN
         )
 
         # Decoder Layers
-        self.dec_res4 = ResidualBlock(
-            channels_list[4], channels_list[3], TIME_EMBED_NCHAN
-        )
-        self.us3 = Upsample(channels_list[3])  # 8
-        self.dec_res3 = ResidualBlock(
-            channels_list[3], channels_list[2], TIME_EMBED_NCHAN
-        )
-        self.us2 = Upsample(channels_list[2])  # 16
-        self.dec_res2 = ResidualBlock(
-            channels_list[2], channels_list[1], TIME_EMBED_NCHAN, has_attn=True
-        )
-        self.us1 = Upsample(channels_list[1])  # 32
-        self.dec_res1 = ResidualBlock(
-            channels_list[1],
-            channels_list[0],
-            TIME_EMBED_NCHAN,
-        )
+        self.dec_layers = []
+        self.upsample_layers = []
+        in_chan = img_channels_list[-1]
+        for i, out_chan in reversed(list(enumerate(img_channels_list))):
+            self.dec_layers.append(ResidualBlock(in_chan, out_chan, TIME_EMBED_NCHAN, has_attn=attn_layers[i]))
+            if i > 0:
+                self.upsample_layers.append(Upsample(out_chan))
+            in_chan = out_chan
 
-        self.gn = nn.GroupNorm(num_groups, channels_list[0])
+        self.gn = nn.GroupNorm(num_groups, img_channels_list[0])
         self.act = nn.SiLU()
         self.final_conv = nn.Conv2d(
-            in_channels=channels_list[0], out_channels=in_channels
+            in_channels=img_channels_list[0], out_channels=in_channels
         )
 
     def forward(self, img: torch.Tensor, t: torch.Tensor):
-        # Implement forward logic through all layers. Make sure to implement skip connections!
+        # TODO: Implement forward logic through all layers. Make sure to implement skip connections!
         emb_t = self.time_embed(t)
+        img_conv = self.conv1(img)
+
+        # 
