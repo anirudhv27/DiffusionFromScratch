@@ -206,5 +206,7 @@ class DiffusionUNet(nn.Module):
             if i < len(self.dec_layers):
                 out = self.upsample_layers[i](out)
         
-        return out
-            
+        out = self.gn(out)
+        out = self.act(out)
+        in_tensor = torch.cat([out, enc_imgs[-1]], dim=1)
+        return self.final_conv(in_tensor, emb_t)
