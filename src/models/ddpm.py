@@ -139,7 +139,6 @@ class DiffusionUNet(nn.Module):
         Initialization for a 32 x 32 dataset.
         """
         super().__init__()
-        resolutions_list = [32, 32, 16, 8, 4]
         TIME_EMBED_NCHAN = start_ch * 4
 
         self.conv1 = nn.Conv2d(in_channels, start_ch)
@@ -154,7 +153,7 @@ class DiffusionUNet(nn.Module):
         in_chan = start_ch
         for i, out_chan in enumerate(img_channels_list):
             self.enc_layers.append(ResidualBlock(in_chan, out_chan, TIME_EMBED_NCHAN, has_attn=attn_layers[i]))
-            if i < len(img_channels_list):
+            if i < len(img_channels_list) - 1:
                 self.downsample_layers.append(Downsample(out_chan))
             in_chan = out_chan
 
@@ -183,8 +182,29 @@ class DiffusionUNet(nn.Module):
         )
 
     def forward(self, img: torch.Tensor, t: torch.Tensor):
-        # TODO: Implement forward logic through all layers. Make sure to implement skip connections!
         emb_t = self.time_embed(t)
         img_conv = self.conv1(img)
 
-        # 
+        # Downsample
+        enc_imgs = [] # 
+        enc_imgs.append(img_conv)
+        
+        for i, enc_layer in enumerate(self.enc_layers):
+            enc_img = enc_layer(enc_imgs[-1], emb_t)
+            if i < len(self.enc_layers):
+                enc_img = self.downsample_layers[i](enc_img)
+            enc_imgs.append(enc_imgs)
+        
+        # Middle Block
+        out = self.mid_res2(self.mid_res1(enc_imgs[-1]))
+        
+        # Upsample Block
+        for i, dec_layer in enumerate(self.dec_layers):
+            res = enc_imgs.pop()
+            in_tensor = torch.cat([out, res], dim=1)
+            out = dec_layer(in_tensor, emb_t)
+            if i < len(self.dec_layers):
+                out = self.upsample_layers[i](out)
+        
+        return out
+            
