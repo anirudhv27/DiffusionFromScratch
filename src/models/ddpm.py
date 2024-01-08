@@ -135,7 +135,7 @@ class DiffusionUNet(nn.Module):
     Compose ResidualBlocks in UNet for noise prediction.
     """
 
-    def __init__(self, in_channels=3):
+    def __init__(self, in_channels=3, num_groups=32):
         """
         Initialization for a 32 x 32 dataset.
         """
@@ -188,10 +188,17 @@ class DiffusionUNet(nn.Module):
         )
         self.us1 = Upsample(channels_list[1])  # 32
         self.dec_res1 = ResidualBlock(
-            channels_list[1], channels_list[0], TIME_EMBED_NCHAN,
+            channels_list[1],
+            channels_list[0],
+            TIME_EMBED_NCHAN,
+        )
+
+        self.gn = nn.GroupNorm(num_groups, channels_list[0])
+        self.act = nn.SiLU()
+        self.final_conv = nn.Conv2d(
+            in_channels=channels_list[0], out_channels=in_channels
         )
 
     def forward(self, img: torch.Tensor, t: torch.Tensor):
-        # TODO: Fix Positional Embedding t. Only compute linear transform once, use the same embedding in all layers.
         # Implement forward logic through all layers. Make sure to implement skip connections!
         emb_t = self.time_embed(t)
