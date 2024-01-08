@@ -48,11 +48,12 @@ class Downsample(nn.Module):
     """
 
     def __init__(self, num_channels):
+        super().__init__()
         self.conv = nn.Conv2d(
             num_channels, num_channels, kernel_size=3, stride=2, padding=1
         )
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, t: torch.Tensor):
         return self.conv(x)
 
 
@@ -62,11 +63,12 @@ class Upsample(nn.Module):
     """
 
     def __init__(self, num_channels):
+        super().__init__()
         self.conv_transpose = nn.ConvTranspose2d(
             num_channels, num_channels, kernel_size=4, stride=2, padding=1
         )
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, t: torch.Tensor):
         return self.conv_transpose(x)
 
 
@@ -89,7 +91,7 @@ class ResidualBlock(nn.Module):
         self.gn1 = nn.GroupNorm(num_groups=num_groups, num_channels=in_channels)
         self.act = nn.SiLU()  #
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.dropout = nn.Dropout2d(dropout_p)
+        self.dropout = nn.Dropout(dropout_p)
 
         # Linear Layer for sinusoidal embedding
         self.time_dense = nn.Linear(time_dims, out_channels)
@@ -102,7 +104,7 @@ class ResidualBlock(nn.Module):
             self.skip = nn.Identity()
         else:
             self.skip = nn.Conv2d(
-                in_channels, out_channels, 1
+                in_channels, out_channels, kernel_size=1
             )  # Learn expansion of data to out_channels dimension!
 
         if has_attn:
@@ -120,93 +122,138 @@ class ResidualBlock(nn.Module):
 
         out = out + emb_t[:, :, None, None]
 
-        out = self.act(self.gn2(x))
+        out = self.gn2(out)
+        out = self.act(out)
         out = self.dropout(out)
         out = self.conv2(out)
 
         assert out.shape == residual.shape
 
-        return out + residual
+        return self.attn(out + residual)
 
+class AttentionBlock(nn.Module):
+    pass
 
 class DiffusionUNet(nn.Module):
     """
     Compose ResidualBlocks in UNet for noise prediction.
     """
 
-    def __init__(self, in_channels=3, img_channels_list=[128, 256, 256, 256], attn_layers=[False, True, False, False], start_ch=128, num_groups=32):
+    def __init__(
+        self,
+        img_channels=3,
+        start_ch=64,
+        chan_mults=(1, 2, 2, 4),
+        attn_layers=(False, False, False, False),
+        blocks_per_res=2,
+    ):
         """
         Initialization for a 32 x 32 dataset.
         """
         super().__init__()
-        TIME_EMBED_NCHAN = start_ch * 4
-
-        self.conv1 = nn.Conv2d(in_channels, start_ch)
+        n_scales = len(chan_mults)
+        self.conv1 = nn.Conv2d(img_channels, start_ch, kernel_size=3, padding=1)
         self.time_embed = SinusoidalEmbedding(
-            TIME_EMBED_NCHAN
+            start_ch * 4
         )  # Start at 4x initial dimension. Max number of channels in this network's bottleneck.
 
         # Encoder Layers:
-        self.enc_layers = []
-        self.downsample_layers = []
-        
+        enc_layers = []
+        out_chan = start_ch
         in_chan = start_ch
-        for i, out_chan in enumerate(img_channels_list):
-            self.enc_layers.append(ResidualBlock(in_chan, out_chan, TIME_EMBED_NCHAN, has_attn=attn_layers[i]))
-            if i < len(img_channels_list) - 1:
-                self.downsample_layers.append(Downsample(out_chan))
-            in_chan = out_chan
+        for i, (mult, attn) in enumerate(zip(chan_mults, attn_layers)):
+            out_chan = in_chan * mult
+            for _ in range(blocks_per_res):
+                enc_layers.append(
+                    ResidualBlock(in_chan, out_chan, start_ch * 4, has_attn=attn)
+                )
+                in_chan = out_chan
+
+            if i < n_scales - 1:
+                enc_layers.append(Downsample(in_chan))
+
+        self.encoder = nn.ModuleList(enc_layers)
 
         # Bottleneck Layer
         self.mid_res1 = ResidualBlock(
-            img_channels_list[-1], img_channels_list[-1], TIME_EMBED_NCHAN, has_attn=True
+            in_chan,
+            in_chan,
+            start_ch * 4,
+            has_attn=False,
         )
-        self.mid_res2 = ResidualBlock(
-            img_channels_list[-1], img_channels_list[-1], TIME_EMBED_NCHAN
-        )
+        self.mid_res2 = ResidualBlock(in_chan, in_chan, start_ch * 4)
 
         # Decoder Layers
-        self.dec_layers = []
-        self.upsample_layers = []
-        in_chan = img_channels_list[-1]
-        for i, out_chan in reversed(list(enumerate(img_channels_list))):
-            self.dec_layers.append(ResidualBlock(in_chan, out_chan, TIME_EMBED_NCHAN, has_attn=attn_layers[i]))
-            if i > 0:
-                self.upsample_layers.append(Upsample(out_chan))
+        dec_layers = []
+        in_chan = out_chan
+        for i, (mult, attn) in reversed(list(enumerate(zip(chan_mults, attn_layers)))):
+            out_chan = in_chan
+            for _ in range(blocks_per_res):
+                dec_layers.append(
+                    ResidualBlock(
+                        in_chan + out_chan,
+                        out_chan,
+                        start_ch * 4,
+                        has_attn=attn,
+                    )
+                )
+                
+            out_chan = in_chan // mult
+            dec_layers.append(
+                ResidualBlock(
+                    in_chan + out_chan,
+                    out_chan,
+                    start_ch * 4,
+                    has_attn=attn,
+                )
+            )
             in_chan = out_chan
+            if i > 0:
+                dec_layers.append(Upsample(out_chan))
 
-        self.gn = nn.GroupNorm(num_groups, img_channels_list[0])
+        self.decoder = nn.ModuleList(dec_layers)
+
+        self.gn = nn.GroupNorm(8, start_ch)  # As per DDPM Paper
         self.act = nn.SiLU()
         self.final_conv = nn.Conv2d(
-            in_channels=img_channels_list[0], out_channels=in_channels
+            in_channels=start_ch,
+            out_channels=img_channels,
+            kernel_size=3,
+            padding=1,
         )
 
     def forward(self, img: torch.Tensor, t: torch.Tensor):
         emb_t = self.time_embed(t)
-        img_conv = self.conv1(img)
+        out = self.conv1(img)
 
         # Downsample
-        enc_imgs = [] # 
-        enc_imgs.append(img_conv)
-        
-        for i, enc_layer in enumerate(self.enc_layers):
-            enc_img = enc_layer(enc_imgs[-1], emb_t)
-            if i < len(self.enc_layers):
-                enc_img = self.downsample_layers[i](enc_img)
-            enc_imgs.append(enc_imgs)
-        
+        enc_imgs = []
+        enc_imgs.append(out)
+
+        for enc_layer in self.encoder:
+            out = enc_layer(out, emb_t)
+            enc_imgs.append(out)
+
         # Middle Block
-        out = self.mid_res2(self.mid_res1(enc_imgs[-1]))
-        
+        out = self.mid_res2(self.mid_res1(out, emb_t), emb_t)
+
         # Upsample Block
-        for i, dec_layer in enumerate(self.dec_layers):
-            res = enc_imgs.pop()
-            in_tensor = torch.cat([out, res], dim=1)
-            out = dec_layer(in_tensor, emb_t)
-            if i < len(self.dec_layers):
-                out = self.upsample_layers[i](out)
-        
+        for dec_layer in self.decoder:
+            if isinstance(dec_layer, Upsample):
+                out = dec_layer(out, emb_t)
+            else:
+                res = enc_imgs.pop()
+                out = torch.cat([out, res], dim=1)
+                out = dec_layer(out, emb_t)
+                
         out = self.gn(out)
         out = self.act(out)
-        in_tensor = torch.cat([out, enc_imgs[-1]], dim=1)
-        return self.final_conv(in_tensor, emb_t)
+        return self.final_conv(out)
+
+
+if __name__ == "__main__":
+    img = torch.randint(0, 256, (1, 3, 32, 32)).float()
+    t = torch.randint(0, 100, (1,)).float()
+    model = DiffusionUNet()
+    out = model(img, t)
+    print(out.shape)
