@@ -110,12 +110,15 @@ class ResidualBlock(nn.Module):
         if has_attn:
             self.attn = nn.MultiheadAttention(out_channels, num_heads=1)
         else:
-            self.attn = nn.Identity()
+            self.attn = None
 
     def forward(self, x: torch.Tensor, emb_t: torch.Tensor) -> torch.Tensor:
+        print("x shape: ", x.shape)
         residual = self.skip(x)
 
-        out = self.conv1(self.act(self.gn1(x)))  # Shape = (B x out_channels x H x W)
+        out: torch.Tensor = self.conv1(
+            self.act(self.gn1(x))
+        )  # Shape = (B x out_channels x H x W)
 
         # Add timestep embedding
         emb_t = self.time_dense(self.act(emb_t))  # Shape = (B x out_channels)
@@ -128,11 +131,21 @@ class ResidualBlock(nn.Module):
         out = self.conv2(out)
 
         assert out.shape == residual.shape
+        out += residual
+        if self.attn:
+            # Flatten last two dimensions on last two axis,
+            out = out.flatten(start_dim=2, end_dim=3)
+            out = out.permute((0, 2, 1))
+            # Self attention
+            out = self.attn(out, out, out)[0]
+            # Unflatten last dimension
+            out = out.permute((0, 2, 1))
+            out = out.unflatten(
+                -1, (int(out.shape[2] ** 0.5), int(out.shape[2] ** 0.5))
+            )
 
-        return self.attn(out + residual)
+        return out
 
-class AttentionBlock(nn.Module):
-    pass
 
 class DiffusionUNet(nn.Module):
     """
@@ -144,7 +157,7 @@ class DiffusionUNet(nn.Module):
         img_channels=3,
         start_ch=64,
         chan_mults=(1, 2, 2, 4),
-        attn_layers=(False, False, False, False),
+        attn_layers=(False, False, True, True),
         blocks_per_res=2,
     ):
         """
@@ -179,7 +192,7 @@ class DiffusionUNet(nn.Module):
             in_chan,
             in_chan,
             start_ch * 4,
-            has_attn=False,
+            has_attn=True,
         )
         self.mid_res2 = ResidualBlock(in_chan, in_chan, start_ch * 4)
 
@@ -197,7 +210,7 @@ class DiffusionUNet(nn.Module):
                         has_attn=attn,
                     )
                 )
-                
+
             out_chan = in_chan // mult
             dec_layers.append(
                 ResidualBlock(
@@ -208,6 +221,7 @@ class DiffusionUNet(nn.Module):
                 )
             )
             in_chan = out_chan
+
             if i > 0:
                 dec_layers.append(Upsample(out_chan))
 
@@ -245,7 +259,7 @@ class DiffusionUNet(nn.Module):
                 res = enc_imgs.pop()
                 out = torch.cat([out, res], dim=1)
                 out = dec_layer(out, emb_t)
-                
+
         out = self.gn(out)
         out = self.act(out)
         return self.final_conv(out)
@@ -255,5 +269,6 @@ if __name__ == "__main__":
     img = torch.randint(0, 256, (1, 3, 32, 32)).float()
     t = torch.randint(0, 100, (1,)).float()
     model = DiffusionUNet()
+    print(model)
     out = model(img, t)
     print(out.shape)
