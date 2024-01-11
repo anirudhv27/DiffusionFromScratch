@@ -113,7 +113,7 @@ class ResidualBlock(nn.Module):
             self.attn = None
 
     def forward(self, x: torch.Tensor, emb_t: torch.Tensor) -> torch.Tensor:
-        print("x shape: ", x.shape)
+        # print("x shape: ", x.shape)
         residual = self.skip(x)
 
         out: torch.Tensor = self.conv1(

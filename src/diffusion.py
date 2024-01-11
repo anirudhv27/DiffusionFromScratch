@@ -5,8 +5,9 @@ import lightning as L
 import torch
 import torchvision
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
+from torchvision.datasets.cifar import CIFAR10
 
-import models.unet as UNet
+from models.unet import DiffusionUNet
 
 """
 Training algorithm step:
@@ -22,31 +23,35 @@ Sampling:
 class LightingDiffusion(L.LightningModule):
     def __init__(
         self,
-        model: UNet,
+        model: DiffusionUNet,
         T: int = 1000,
         beta_start: float = 1e-4,
         beta_end: float = 0.02,
     ):
         super().__init__()
-        self.model: UNet = model
+        self.model: DiffusionUNet = model
+        self.model.to('cpu')
         self.T = T
-        self.betas = torch.linspace(beta_start, beta_end, T)
+        self.betas = torch.linspace(beta_start, beta_end, T).to('mps')
         self.alphas = 1 - self.betas
         self.alpha_bars = torch.cumprod(
-            self.alphas
+            self.alphas, dim=0
         )  # zero indexed: just remember to subtract one before indexing to get value!
 
     def training_step(self, batch, batch_idx):
-        assert batch.shape[0] == t_batch.shape[0]
-
+        batch = batch[0] # don't need label information        
+        batch = batch.to('mps')
+        
         # Sample random values from 0 to T - 1
         batch_size = batch.shape[0]
-        t_batch = torch.randint(1, self.T, (batch_size,))
+        t_batch = torch.randint(1, self.T, (batch_size,)).to('mps')
+        assert batch.shape[0] == t_batch.shape[0]
 
-        gt_noise = torch.randn_like(batch)
+        gt_noise = torch.randn_like(batch).to('mps')
+        
         pred_noise = self.model(
-            self.alpha_bars[t_batch] * batch
-            + torch.sqrt(1 - self.alpha_bars) * gt_noise,
+            self.alpha_bars[t_batch - 1] * batch
+            + torch.sqrt(1 - self.alpha_bars)[t_batch - 1] * gt_noise,
             t_batch,
         )
         loss_fn = torch.nn.functional.mse_loss(pred_noise, gt_noise)
@@ -58,12 +63,15 @@ class LightingDiffusion(L.LightningModule):
 
 
 if __name__ == "__main__":
-    model = UNet()
+    model = DiffusionUNet()
     diffusion = LightingDiffusion(model)
 
     # setup data for MNIST
-    dataset = torchvision.datasets.MNIST(
-        os.getcwd(), download=True, transform=torch.ToTensor()
+    torchvision.datasets.CIFAR10.url = torchvision.datasets.CIFAR10.url.replace(
+        "https://", "http://"
+    )
+    dataset = torchvision.datasets.CIFAR10(
+        os.path.dirname(os.getcwd()) + '/data', download=True, transform=torchvision.transforms.ToTensor()
     )
     train_loader = torch.utils.data.DataLoader(dataset)
 
