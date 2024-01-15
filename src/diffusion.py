@@ -91,6 +91,7 @@ class LightingDiffusion(L.LightningModule):
                 x_next = x_t - (1 - alpha_t) / torch.sqrt(1 - alpha_bar_t) * pred_denoise
                 
                 x_t = 1 / torch.sqrt(alpha_t) * x_next + beta_t ** 0.5 * z
+                
         return x_t
 
     def sample_ddim(self):
