@@ -7,19 +7,9 @@ import torch
 import torchvision
 from lightning.pytorch.utilities.types import STEP_OUTPUT, OptimizerLRScheduler
 from torchvision.datasets.cifar import CIFAR10
+from tqdm import tqdm
 
 from models.unet import DiffusionUNet
-
-"""
-Training algorithm step:
-- Sample a random data point, and sample T
-- Produce a random noise
-- Make gradient descent step (Loss function is equal to the MSE between the actual and predicted noise, using computed alphas and betas)
-
-Sampling:
-- Sample a random noise, then iteratively predict previous noise until the initial image is found
-"""
-
 
 class LightingDiffusion(L.LightningModule):
     def __init__(
@@ -31,29 +21,33 @@ class LightingDiffusion(L.LightningModule):
         super().__init__()
         self.model = DiffusionUNet()
         self.T = T
-        self.betas = torch.linspace(beta_start, beta_end, T).to("mps")
-        self.alphas = 1.0 - self.betas
-        self.alpha_bars = torch.cumprod(
-            self.alphas, dim=0
-        )  # zero indexed: just remember to subtract one before indexing to get value!
-        self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
-        self.sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - self.alpha_bars)
+        betas = torch.linspace(beta_start, beta_end, T)
+        alphas = torch.ones_like(betas) - betas
+        alpha_bars = torch.cumprod(
+            alphas, dim=0,
+        )  # zero indexed
+        sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - alpha_bars)
+        
+        # Register as buffers to move to correct device automatically
+        self.register_buffer('betas', betas)
+        self.register_buffer('alphas', alphas)
+        self.register_buffer('alpha_bars', alpha_bars)
+        self.register_buffer('sqrt_one_minus_alpha_bars', sqrt_one_minus_alpha_bars)
 
     def training_step(self, batch, batch_idx):
-        batch = batch[0]  # don't need label information
-        batch = batch.to("mps")
-
+        batch = batch[0]  # remove label information
+        
         # Sample random values from 0 to T - 1
         batch_size = batch.shape[0]
         # print('batch shape', batch.shape)
-        t_batch = torch.randint(0, self.T, (batch_size,), device=batch.device)
+        t_batch = torch.randint(0, self.T, (batch_size,), device=self.device)
         # print('t batch shape', t_batch.shape)
 
         assert batch.shape[0] == t_batch.shape[0]
 
         # print("t_shape", t_batch.shape)
 
-        noise = torch.randn_like(batch).to("mps")
+        noise = torch.randn_like(batch)
         alpha_bars_batch = self.alpha_bars[t_batch].view(batch_size, 1, 1, 1)
         sqrt_one_minus_alpha_bars_batch = self.sqrt_one_minus_alpha_bars[t_batch].view(
             batch_size, 1, 1, 1
@@ -63,6 +57,8 @@ class LightingDiffusion(L.LightningModule):
             alpha_bars_batch * batch + sqrt_one_minus_alpha_bars_batch * noise
         )
 
+        # print("moised batch shape", noised_batch.shape)
+        # print("t batch shape", t_batch.shape)
         pred_noise = self.model(
             noised_batch,
             t_batch,
@@ -75,25 +71,26 @@ class LightingDiffusion(L.LightningModule):
         )
         return loss
 
-    def sample_ddpm(self, img_size: Union[list[int], tuple[int]]):
+    def sample_ddpm(self, n_imgs: int, img_size: int):
         """
-        Use DDPM iterative sampling to generate a new image of size img_size
+        Use DDPM iterative sampling to generate a batch of new images (B x 3 x size x size)
         """
-        assert len(img_size) == 3
-        x_t = torch.randn(img_size)
-        for t in range(self.T - 1, -1, -1):
-            z = torch.randn_like(x_t) if t > 0 else torch.zeros_like(x_t)
-            x_t = (
-                1
-                / self.sqrt_alpha_bars[t]
-                * (
-                    x_t - self.model(x_t, torch.tensor([t])),
-                    (1 - self.alpha_bars[t]) / (self.sqrt_one_minus_alpha_bars[t]),
-                )
-            )
-
-            x_t += self.betas[t] ** 0.5 * z
-
+        
+        x_t = torch.randn((n_imgs, 3, img_size, img_size))
+        with torch.no_grad():
+            for t in tqdm(reversed(range(self.T))):
+                t_tensor = torch.ones(n_imgs) * t
+                z = torch.randn_like(x_t) if t > 0 else torch.zeros_like(x_t)
+                
+                pred_denoise = self.model(x_t, t_tensor)
+                
+                alpha_t = self.alphas[t]
+                alpha_bar_t = self.alpha_bars[t]
+                beta_t = self.betas[t]
+                
+                x_next = x_t - (1 - alpha_t) / torch.sqrt(1 - alpha_bar_t) * pred_denoise
+                
+                x_t = 1 / torch.sqrt(alpha_t) * x_next + beta_t ** 0.5 * z
         return x_t
 
     def sample_ddim(self):
@@ -106,30 +103,23 @@ class LightingDiffusion(L.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=2e-4)
         return optimizer
 
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     diffusion = LightingDiffusion()
 
-    # # setup data for MNIST
-    # torchvision.datasets.CIFAR10.url = torchvision.datasets.CIFAR10.url.replace(
-    #     "https://", "http://"
-    # )
-    # dataset = torchvision.datasets.CIFAR10(
-    #     os.path.dirname(os.getcwd()) + "/data",
-    #     download=True,
-    #     transform=torchvision.transforms.ToTensor(),
-    # )
-    # train_loader = torch.utils.data.DataLoader(dataset, batch_size=128)
-
-    # # train the model (hint: here are some helpful Trainer arguments for rapid idea iteration)
-    # trainer = L.Trainer(max_epochs=1, default_root_dir=os.getcwd() + "/../results")
-    # trainer.fit(model=diffusion, train_dataloaders=train_loader)
-
-    diffusion = LightingDiffusion.load_from_checkpoint(
-        "../results/lightning_logs/version_1/checkpoints/epoch=0-step=391.ckpt"
+    # setup data for MNIST
+    torchvision.datasets.CIFAR10.url = torchvision.datasets.CIFAR10.url.replace(
+        "https://", "http://"
     )
-    
-    diffusion.eval()
+    dataset = torchvision.datasets.CIFAR10(
+        os.path.dirname(os.getcwd()) + "/data",
+        download=True,
+        transform=torchvision.transforms.ToTensor(),
+    )
+    train_loader = torch.utils.data.DataLoader(dataset, batch_size=128)
 
-    img = diffusion.sample_ddpm((3, 32, 32))
-    plt.imshow(img)
+    # train the model (hint: here are some helpful Trainer arguments for rapid idea iteration)
+    trainer = L.Trainer(max_epochs=10, default_root_dir=os.getcwd() + "/../results")
+    trainer.fit(model=diffusion, train_dataloaders=train_loader)
+
+    diffusion.eval()
+    img = diffusion.sample_ddpm(256, 32)
